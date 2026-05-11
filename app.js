@@ -25,6 +25,9 @@
     contribAmount: 100,
     contribFreq: 12,
     stopAfter: 0,
+    withdrawRate: 0,
+    withdrawStart: 0,
+    withdrawMode: 'current',
   });
 
   let state = {
@@ -88,18 +91,29 @@
     const contribAmount = s.contribAmount || 0;
     const stopAfterMonths = (s.stopAfter && s.stopAfter > 0) ? Math.round(s.stopAfter * 12) : Infinity;
 
+    const withdrawAnnual = (s.withdrawRate || 0) / 100;
+    const withdrawMonthlyRate = withdrawAnnual > 0 ? withdrawAnnual / 12 : 0;
+    const withdrawMode = s.withdrawMode === 'initial' ? 'initial' : 'current';
+    // withdrawStart is in years offset from series start (same convention as delay/stopAfter).
+    // Withdrawals begin at the FIRST month after that boundary (so year 30 = month 361 onward).
+    const withdrawStartMonths = Math.max(0, Math.round((s.withdrawStart || 0) * 12));
+    // For 'initial' mode we lock in the dollar amount when withdrawals begin.
+    let fixedMonthlyWithdrawal = 0;
+    let fixedSnapshotTaken = false;
+
     const yearly = [];
 
     // Delay period: nothing invested yet.
     for (let y = 0; y < delay; y++) {
-      yearly.push({ year: y, balance: 0, totalContrib: 0, totalInterest: 0, invested: 0 });
+      yearly.push({ year: y, balance: 0, totalContrib: 0, totalInterest: 0, totalWithdrawn: 0, invested: 0 });
     }
 
     // Initial deposit lands at year=delay.
     let balance = s.initial || 0;
     let totalContrib = 0;
     let totalInterest = 0;
-    yearly.push({ year: delay, balance, totalContrib: 0, totalInterest: 0, invested: balance });
+    let totalWithdrawn = 0;
+    yearly.push({ year: delay, balance, totalContrib: 0, totalInterest: 0, totalWithdrawn: 0, invested: balance });
 
     for (let m = 1; m <= activeMonths; m++) {
       const interest = balance * monthlyRate;
@@ -109,13 +123,30 @@
         balance += contribAmount;
         totalContrib += contribAmount;
       }
+      // Withdrawal. Total months elapsed since series start = delay*12 + m.
+      if (withdrawMonthlyRate > 0 && (delay * 12 + m) > withdrawStartMonths) {
+        let withdrawal;
+        if (withdrawMode === 'initial') {
+          // Lock in 4%-of-balance-at-retirement dollar amount once, then withdraw that fixed amount.
+          if (!fixedSnapshotTaken) {
+            fixedMonthlyWithdrawal = balance * withdrawMonthlyRate;
+            fixedSnapshotTaken = true;
+          }
+          withdrawal = fixedMonthlyWithdrawal;
+        } else {
+          withdrawal = balance * withdrawMonthlyRate;
+        }
+        balance -= withdrawal;
+        totalWithdrawn += withdrawal;
+      }
       if (m % 12 === 0) {
         yearly.push({
           year: delay + m / 12,
           balance,
           totalContrib,
           totalInterest,
-          invested: (s.initial || 0) + totalContrib,
+          totalWithdrawn,
+          invested: (s.initial || 0) + totalContrib - totalWithdrawn,
         });
       }
     }
@@ -164,6 +195,9 @@
     node.querySelector('.f-contrib').value = s.contribAmount;
     node.querySelector('.f-contribfreq').value = String(s.contribFreq);
     node.querySelector('.f-stopafter').value = s.stopAfter || 0;
+    node.querySelector('.f-withdrawrate').value = s.withdrawRate || 0;
+    node.querySelector('.f-withdrawstart').value = s.withdrawStart || 0;
+    node.querySelector('.f-withdrawmode').value = s.withdrawMode === 'initial' ? 'initial' : 'current';
     node.querySelector('.f-color').value = s.color;
     if (state.series.length <= 1) {
       node.querySelector('.delete-series').disabled = true;
@@ -271,7 +305,7 @@
     const sims = enabled.map((s) => ({ s, sim: simulate(s) }));
     const allYears = buildYearAxis(sims.map((x) => x.sim));
 
-    const headers = ['Contrib', 'Invested', 'Interest', 'Balance'];
+    const headers = ['Contrib', 'Withdrawn', 'Invested', 'Interest', 'Balance'];
     const span = headers.length;
 
     const hasAge = state.startAge != null && state.startAge !== '' && !isNaN(parseInt(state.startAge));
@@ -305,6 +339,7 @@
         } else {
           const cells = [
             fmtMoney(pt.totalContrib),
+            fmtMoney(pt.totalWithdrawn || 0),
             fmtMoney(pt.invested),
             fmtMoney(pt.totalInterest),
             fmtMoney(pt.balance),
@@ -326,12 +361,24 @@
     document.querySelectorAll('.lbl-contrib').forEach((el) => { el.textContent = `Contribution (${code})`; });
   };
 
+  const updateWithdrawLabel = () => {
+    const s = state.series.find((x) => x.id === state.activeId);
+    if (!s) return;
+    const hasAge = state.startAge != null && state.startAge !== '' && !isNaN(parseInt(state.startAge));
+    const startAge = hasAge ? Math.max(0, parseInt(state.startAge)) : null;
+    const ws = parseInt(s.withdrawStart) || 0;
+    document.querySelectorAll('.lbl-withdrawstart').forEach((el) => {
+      el.textContent = hasAge ? `Withdraw from year (age ${startAge + ws})` : 'Withdraw from (yr)';
+    });
+  };
+
   const renderAll = () => {
     document.getElementById('currency').value = state.currency || '$';
     document.getElementById('startAge').value = state.startAge ?? '';
     renderTabs();
     renderEditor();
     updateCurrencyLabels();
+    updateWithdrawLabel();
     renderChart();
     renderTable();
     syncUrl();
@@ -368,7 +415,7 @@
       const s = String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const cols = ['Contrib', 'Invested', 'Interest', 'Balance'];
+    const cols = ['Contrib', 'Withdrawn', 'Invested', 'Interest', 'Balance'];
     const header = hasAge ? ['Age', 'Year'] : ['Year'];
     sims.forEach(({ s }) => cols.forEach((c) => header.push(esc(`${s.name} ${c}`))));
     const rows = [header.join(',')];
@@ -377,10 +424,11 @@
       sims.forEach(({ sim }) => {
         const pt = valueAtYear(sim, y);
         if (!pt) {
-          row.push('', '', '', '');
+          row.push('', '', '', '', '');
         } else {
           row.push(
             Math.round(pt.totalContrib),
+            Math.round(pt.totalWithdrawn || 0),
             Math.round(pt.invested),
             Math.round(pt.totalInterest),
             Math.round(pt.balance),
@@ -411,6 +459,7 @@
   document.getElementById('startAge').addEventListener('input', (e) => {
     const v = e.target.value;
     state.startAge = v === '' ? null : Math.max(0, parseInt(v) || 0);
+    updateWithdrawLabel();
     lightUpdate();
   });
 
@@ -446,6 +495,9 @@
     else if (t.classList.contains('f-contrib')) s.contribAmount = parseFloat(t.value) || 0;
     else if (t.classList.contains('f-contribfreq')) s.contribFreq = parseInt(t.value);
     else if (t.classList.contains('f-stopafter')) s.stopAfter = Math.max(0, parseInt(t.value) || 0);
+    else if (t.classList.contains('f-withdrawrate')) s.withdrawRate = Math.max(0, parseFloat(t.value) || 0);
+    else if (t.classList.contains('f-withdrawstart')) { s.withdrawStart = Math.max(0, parseInt(t.value) || 0); updateWithdrawLabel(); }
+    else if (t.classList.contains('f-withdrawmode')) s.withdrawMode = t.value === 'initial' ? 'initial' : 'current';
     else if (t.classList.contains('f-color')) s.color = t.value;
     else return;
     lightUpdate();
@@ -493,6 +545,7 @@
     enabled: true,
     initial: 0, rate: 5, years: 50, delay: 0,
     compounding: 1, contribAmount: 100, contribFreq: 12, stopAfter: 0,
+    withdrawRate: 0, withdrawStart: 0, withdrawMode: 'current',
     ...overrides,
   });
 
@@ -555,6 +608,20 @@
         series: [mkSeries({ name: 'Drawdown', color: PALETTE[3], initial: 1000000, rate: 5, years: 30, compounding: 12, contribAmount: -5500 })],
       },
     },
+    {
+      title: 'The 4% rule: contribute then draw 4%/yr at 65',
+      blurb: '$500/month from age 25 until 65, then withdraw 4% of the balance-at-retirement each year (fixed dollars, the textbook Trinity-study version). Switch the withdraw mode to compare against "% of current balance".',
+      state: {
+        currency: '$', startAge: 25,
+        series: [mkSeries({
+          name: '4% rule (fixed $)',
+          color: PALETTE[4],
+          initial: 0, rate: 7, years: 70, compounding: 12,
+          contribAmount: 500, stopAfter: 40,
+          withdrawRate: 4, withdrawStart: 40, withdrawMode: 'initial',
+        })],
+      },
+    },
   ];
 
   const renderExampleLinks = () => {
@@ -601,6 +668,20 @@
     });
   };
 
+  const normaliseStateAfterLoad = () => {
+    if (!state.currency) state.currency = '$';
+    if (state.startAge === undefined) state.startAge = null;
+    state.series.forEach((s) => {
+      if (!s.id) s.id = uid();
+      if (s.withdrawRate == null) s.withdrawRate = 0;
+      if (s.withdrawStart == null) s.withdrawStart = 0;
+      if (s.withdrawMode !== 'initial') s.withdrawMode = 'current';
+    });
+    if (!state.activeId || !state.series.find((s) => s.id === state.activeId)) {
+      state.activeId = state.series[0].id;
+    }
+  };
+
   // Intercept clicks on scenario links so they update state in place (no full reload).
   // Right-click / open-in-new-tab still works because the href is a real URL.
   document.addEventListener('click', (e) => {
@@ -611,12 +692,7 @@
     const url = new URL(a.href, window.location.href);
     history.pushState(null, '', url.pathname + url.search + url.hash);
     loadStateFromUrl();
-    if (!state.currency) state.currency = '$';
-    if (state.startAge === undefined) state.startAge = null;
-    state.series.forEach((s) => { if (!s.id) s.id = uid(); });
-    if (!state.activeId || !state.series.find((s) => s.id === state.activeId)) {
-      state.activeId = state.series[0].id;
-    }
+    normaliseStateAfterLoad();
     renderAll();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
@@ -624,23 +700,13 @@
   // Browser back/forward should also reload state.
   window.addEventListener('popstate', () => {
     loadStateFromUrl();
-    if (!state.currency) state.currency = '$';
-    if (state.startAge === undefined) state.startAge = null;
-    state.series.forEach((s) => { if (!s.id) s.id = uid(); });
-    if (!state.activeId || !state.series.find((s) => s.id === state.activeId)) {
-      state.activeId = state.series[0].id;
-    }
+    normaliseStateAfterLoad();
     renderAll();
   });
 
   // ---------- Init ----------
   loadStateFromUrl();
-  if (!state.currency) state.currency = '$';
-  if (state.startAge === undefined) state.startAge = null;
-  state.series.forEach((s) => { if (!s.id) s.id = uid(); });
-  if (!state.activeId || !state.series.find((s) => s.id === state.activeId)) {
-    state.activeId = state.series[0].id;
-  }
+  normaliseStateAfterLoad();
   renderAll();
   renderExampleLinks();
   renderWorkedLinks();

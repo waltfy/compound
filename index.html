@@ -322,9 +322,17 @@
         </select>
       </label>
       <label>Stop after (yrs)<input type="number" class="f-stopafter" step="1" min="0" placeholder="0 = never" /></label>
+      <label><span class="lbl-withdrawrate">Withdraw rate (%/yr)</span><input type="number" class="f-withdrawrate" step="0.1" min="0" placeholder="0 = off" /></label>
+      <label><span class="lbl-withdrawstart">Withdraw from (yr)</span><input type="number" class="f-withdrawstart" step="1" min="0" /></label>
+      <label>Withdraw mode
+        <select class="f-withdrawmode">
+          <option value="current">% of current balance</option>
+          <option value="initial">% of balance at start (fixed $)</option>
+        </select>
+      </label>
       <label>Color<input type="color" class="f-color" /></label>
     </div>
-    <p class="hint">Tip: negative contribution = withdrawal.</p>
+    <p class="hint">Tip: a 4% withdraw rate starting at retirement age models the classic "4% rule". Set Stop after = Withdraw from to also halt contributions at retirement.</p>
   </div>
 </template>
 </body>
