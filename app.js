@@ -51,28 +51,48 @@
       return JSON.parse(json);
     } catch { return null; }
   };
+  const STORAGE_KEY = 'compound-state-v1';
+
+  const stripStateFromUrl = () => {
+    const anchor = window.location.hash && !/[#&]s=/.test(window.location.hash) ? window.location.hash : '';
+    history.replaceState(null, '', window.location.pathname + anchor);
+  };
+
   const loadStateFromUrl = () => {
-    // Prefer query string; fall back to legacy hash format.
+    // Shared-link path takes precedence, then the URL is wiped clean.
     let enc = new URLSearchParams(window.location.search).get('s');
     if (!enc) {
       const m = window.location.hash.match(/[#&]s=([^&]+)/);
       enc = m ? m[1] : null;
     }
-    if (!enc) return;
-    const decoded = decodeState(enc);
-    if (decoded && Array.isArray(decoded.series) && decoded.series.length) {
-      state = decoded;
+    if (enc) {
+      const decoded = decodeState(enc);
+      if (decoded && Array.isArray(decoded.series) && decoded.series.length) {
+        state = decoded;
+        stripStateFromUrl();
+        return;
+      }
     }
+    // Otherwise restore the user's last session from localStorage.
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const decoded = JSON.parse(raw);
+      if (decoded && Array.isArray(decoded.series) && decoded.series.length) {
+        state = decoded;
+      }
+    } catch {}
   };
-  let urlUpdateTimer = null;
+  let persistTimer = null;
   const syncUrl = () => {
-    clearTimeout(urlUpdateTimer);
-    urlUpdateTimer = setTimeout(() => {
-      const enc = encodeState(state);
-      // Preserve any active anchor (e.g. #learn) so in-page nav coexists with state sharing.
-      const anchor = window.location.hash && !/[#&]s=/.test(window.location.hash) ? window.location.hash : '';
-      history.replaceState(null, '', '?s=' + enc + anchor);
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
     }, 200);
+  };
+  const buildShareUrl = () => {
+    const enc = encodeState(state);
+    return window.location.origin + window.location.pathname + '?s=' + enc;
   };
 
   // ---------- Math ----------
@@ -258,6 +278,53 @@
     const labels = allYears.map((y) =>
       hasAge ? [`Age ${startAge + y}`, `Yr ${y}`] : `Year ${y}`
     );
+
+    // Vertical reference lines: contrib-stop and withdraw-start per series.
+    const annotations = {};
+    sims.forEach(({ s }, idx) => {
+      const seriesYears = Math.max(1, s.years || 0);
+      if (s.stopAfter && s.stopAfter > 0) {
+        const stopYear = (s.delay || 0) + s.stopAfter;
+        if (stopYear > 0 && stopYear < seriesYears && allYears.indexOf(stopYear) >= 0) {
+          annotations[`stop_${s.id}`] = {
+            type: 'line',
+            xMin: stopYear, xMax: stopYear,
+            borderColor: s.color, borderWidth: 1.5,
+            borderDash: [4, 4],
+            label: {
+              display: true,
+              content: 'Stop contrib',
+              position: 'start',
+              backgroundColor: s.color, color: '#fff',
+              padding: { x: 5, y: 2 },
+              font: { size: 10, weight: '600' },
+              yAdjust: idx * 18,
+            },
+          };
+        }
+      }
+      if (s.withdrawRate && s.withdrawRate > 0) {
+        const wStart = s.withdrawStart || 0;
+        if (wStart >= 0 && wStart < seriesYears && allYears.indexOf(wStart) >= 0) {
+          annotations[`wdraw_${s.id}`] = {
+            type: 'line',
+            xMin: wStart, xMax: wStart,
+            borderColor: s.color, borderWidth: 1.5,
+            borderDash: [2, 4],
+            label: {
+              display: true,
+              content: `Withdraw ${s.withdrawRate}%`,
+              position: 'end',
+              backgroundColor: s.color, color: '#fff',
+              padding: { x: 5, y: 2 },
+              font: { size: 10, weight: '600' },
+              yAdjust: idx * 18,
+            },
+          };
+        }
+      }
+    });
+
     const cfg = {
       type: 'line',
       data: { labels, datasets },
@@ -272,6 +339,7 @@
               label: (ctx) => `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y)}`,
             },
           },
+          annotation: { annotations },
         },
         scales: {
           x: { ticks: { color: '#64748b' }, grid: { color: '#e2e8f0' } },
@@ -326,20 +394,34 @@
     });
     html += '</tr></thead><tbody>';
 
+    const fmtFlow = (yearAmt, balance) => {
+      const amtStr = fmtMoney(yearAmt);
+      if (yearAmt === 0) return `${amtStr} <span class="cell-sub">—</span>`;
+      const pctRaw = balance > 0 ? (yearAmt / balance) * 100 : 0;
+      const pct = pctRaw.toFixed(pctRaw >= 10 ? 0 : 1);
+      const monthly = fmtMoney(yearAmt / 12);
+      const subParts = [`${monthly}/mo`];
+      if (balance > 0) subParts.push(`${pct}%`);
+      return `${amtStr} <span class="cell-sub">${subParts.join(' · ')}</span>`;
+    };
+
     allYears.forEach((y) => {
       html += '<tr>';
       if (hasAge) html += `<td>${startAge + y}</td><td class="year-col">${y}</td>`;
       else html += `<td>${y}</td>`;
       sims.forEach(({ sim }) => {
         const pt = valueAtYear(sim, y);
+        const prev = valueAtYear(sim, y - 1);
         if (!pt) {
           for (let i = 0; i < span; i++) {
             html += `<td class="${i === 0 ? 'col-group-divider' : ''}">—</td>`;
           }
         } else {
+          const yrContrib = pt.totalContrib - (prev ? prev.totalContrib : 0);
+          const yrWithdraw = (pt.totalWithdrawn || 0) - (prev ? (prev.totalWithdrawn || 0) : 0);
           const cells = [
-            fmtMoney(pt.totalContrib),
-            fmtMoney(pt.totalWithdrawn || 0),
+            fmtFlow(yrContrib, pt.balance),
+            fmtFlow(yrWithdraw, pt.balance),
             fmtMoney(pt.invested),
             fmtMoney(pt.totalInterest),
             fmtMoney(pt.balance),
@@ -372,6 +454,45 @@
     });
   };
 
+  const renderChartSummary = () => {
+    const el = document.getElementById('chartSummary');
+    if (!el) return;
+    const enabled = state.series.filter((s) => s.enabled);
+    if (enabled.length === 0) { el.innerHTML = ''; return; }
+    const freqName = (f) => f === 12 ? 'month' : f === 4 ? 'quarter' : f === 1 ? 'year' : 'period';
+    const compoundName = (c) => ({1:'annually', 2:'semi-annually', 4:'quarterly', 12:'monthly', 365:'daily'}[c] || `${c}×/yr`);
+    const lines = enabled.map((s) => {
+      const parts = [];
+      parts.push(`grows at <strong>${s.rate || 0}%/yr</strong> (compounded ${compoundName(s.compounding || 12)})`);
+      if (s.contribAmount) {
+        const freq = s.contribFreq || 12;
+        const monthly = s.contribAmount * freq / 12;
+        const annual = s.contribAmount * freq;
+        if (freq === 12) {
+          parts.push(`contributes <strong>${fmtMoney(s.contribAmount)}/mo</strong> (${fmtMoney(annual)}/yr)`);
+        } else {
+          parts.push(`contributes <strong>${fmtMoney(s.contribAmount)}/${freqName(freq)}</strong> ≈ ${fmtMoney(monthly)}/mo`);
+        }
+        if (s.stopAfter > 0) {
+          const stopY = (s.delay || 0) + s.stopAfter;
+          parts.push(`stops at year ${stopY}`);
+        }
+      }
+      if (s.withdrawRate && s.withdrawRate > 0) {
+        const sim = simulate(s);
+        const startYear = Math.max(0, s.withdrawStart || 0);
+        const pt = valueAtYear(sim, startYear) || sim[sim.length - 1];
+        const balanceAtStart = pt ? pt.balance : 0;
+        const monthly = balanceAtStart * (s.withdrawRate / 100) / 12;
+        const modeNote = s.withdrawMode === 'initial' ? ' (fixed $)' : '';
+        parts.push(`withdraws <strong>${s.withdrawRate}%/yr</strong>${modeNote} from year ${startYear} ≈ ${fmtMoney(monthly)}/mo`);
+      }
+      const body = parts.length ? parts.join(' · ') : 'no contributions or withdrawals';
+      return `<li><span class="summary-dot" style="background:${s.color}"></span><strong>${escapeHtml(s.name)}</strong> — ${body}</li>`;
+    });
+    el.innerHTML = `<ul class="summary-list">${lines.join('')}</ul>`;
+  };
+
   const renderAll = () => {
     document.getElementById('currency').value = state.currency || '$';
     document.getElementById('startAge').value = state.startAge ?? '';
@@ -379,6 +500,7 @@
     renderEditor();
     updateCurrencyLabels();
     updateWithdrawLabel();
+    renderChartSummary();
     renderChart();
     renderTable();
     syncUrl();
@@ -387,6 +509,7 @@
   // Light update for editing the active series — avoids rebuilding the editor on every keystroke
   const lightUpdate = () => {
     renderTabs();
+    renderChartSummary();
     renderChart();
     renderTable();
     syncUrl();
@@ -404,49 +527,82 @@
     renderAll();
   });
 
-  const buildCsv = () => {
+  const buildTableData = () => {
     const enabled = state.series.filter((s) => s.enabled);
     const hasAge = state.startAge != null && state.startAge !== '' && !isNaN(parseInt(state.startAge));
     const startAge = hasAge ? Math.max(0, parseInt(state.startAge)) : 0;
-    if (enabled.length === 0) return (hasAge ? 'Age,Year' : 'Year') + '\n';
-    const sims = enabled.map((s) => ({ s, sim: simulate(s) }));
-    const allYears = buildYearAxis(sims.map((x) => x.sim));
-    const esc = (v) => {
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const cols = ['Contrib', 'Withdrawn', 'Invested', 'Interest', 'Balance'];
+    const cols = ['Contrib/yr', 'Contrib/mo', 'Contrib %', 'Withdrawn/yr', 'Withdrawn/mo', 'Withdrawn %', 'Invested', 'Interest', 'Balance'];
     const header = hasAge ? ['Age', 'Year'] : ['Year'];
-    sims.forEach(({ s }) => cols.forEach((c) => header.push(esc(`${s.name} ${c}`))));
-    const rows = [header.join(',')];
-    allYears.forEach((y) => {
+    if (enabled.length === 0) return { header, rows: [] };
+    const sims = enabled.map((s) => ({ s, sim: simulate(s) }));
+    sims.forEach(({ s }) => cols.forEach((c) => header.push(`${s.name} ${c}`)));
+    const allYears = buildYearAxis(sims.map((x) => x.sim));
+    const rows = allYears.map((y) => {
       const row = hasAge ? [startAge + y, y] : [y];
       sims.forEach(({ sim }) => {
         const pt = valueAtYear(sim, y);
+        const prev = valueAtYear(sim, y - 1);
         if (!pt) {
-          row.push('', '', '', '', '');
+          row.push('', '', '', '', '', '', '', '', '');
         } else {
+          const yrContrib = pt.totalContrib - (prev ? prev.totalContrib : 0);
+          const yrWithdraw = (pt.totalWithdrawn || 0) - (prev ? (prev.totalWithdrawn || 0) : 0);
+          const contribPct = pt.balance > 0 ? (yrContrib / pt.balance) * 100 : 0;
+          const withdrawPct = pt.balance > 0 ? (yrWithdraw / pt.balance) * 100 : 0;
           row.push(
-            Math.round(pt.totalContrib),
-            Math.round(pt.totalWithdrawn || 0),
+            Math.round(yrContrib),
+            Math.round(yrContrib / 12),
+            contribPct.toFixed(2),
+            Math.round(yrWithdraw),
+            Math.round(yrWithdraw / 12),
+            withdrawPct.toFixed(2),
             Math.round(pt.invested),
             Math.round(pt.totalInterest),
             Math.round(pt.balance),
           );
         }
       });
-      rows.push(row.join(','));
+      return row;
     });
-    return rows.join('\n');
+    return { header, rows };
+  };
+
+  const buildCsv = () => {
+    const { header, rows } = buildTableData();
+    const esc = (v) => {
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    return [header.map(esc).join(',')].concat(rows.map((r) => r.map(esc).join(','))).join('\n');
+  };
+
+  const buildHtmlTable = () => {
+    const { header, rows } = buildTableData();
+    const esc = (v) => String(v).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const th = header.map((h) => `<th>${esc(h)}</th>`).join('');
+    const tr = rows.map((r) => '<tr>' + r.map((c) => `<td>${esc(c)}</td>`).join('') + '</tr>').join('');
+    return `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
   };
 
   document.getElementById('copyCsv').addEventListener('click', async () => {
     const csv = buildCsv();
+    const html = buildHtmlTable();
     try {
-      await navigator.clipboard.writeText(csv);
-      showToast('CSV copied!');
+      // Write both HTML (for spreadsheet paste — auto-splits into columns) and CSV (plain-text fallback).
+      if (window.ClipboardItem && navigator.clipboard.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'text/html': new Blob([html], { type: 'text/html' }),
+            'text/plain': new Blob([csv], { type: 'text/plain' }),
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(csv);
+      }
+      showToast('Table copied!');
     } catch {
-      showToast('Copy failed');
+      try { await navigator.clipboard.writeText(csv); showToast('CSV copied!'); }
+      catch { showToast('Copy failed'); }
     }
   });
 
@@ -464,12 +620,12 @@
   });
 
   document.getElementById('copyLink').addEventListener('click', async () => {
-    const url = window.location.href;
+    const url = buildShareUrl();
     try {
       await navigator.clipboard.writeText(url);
       showToast('Link copied!');
     } catch {
-      showToast('Copy failed — URL is in the address bar');
+      showToast('Copy failed');
     }
   });
 

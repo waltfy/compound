@@ -3,12 +3,14 @@
     "allow": [
       "Bash(node -e ' *)",
       "mcp__Claude_Preview__preview_start",
-      "Bash(curl -sI http://localhost:58108/)",
-      "Bash(curl -s -m 3 -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:58108/)",
-      "Bash(lsof -nP -iTCP -sTCP:LISTEN)",
-      "Bash(curl -s -m 3 http://localhost:5544/index.html)",
-      "Bash(curl -s -m 3 http://localhost:8000/index.html)",
-      "Bash(curl -s http://localhost:5544/index.html)"
+      "Bash(curl -sI http://localhost:60635/)",
+      "Bash(curl -sI http://localhost:5544/)",
+      "Bash(lsof -nP -iTCP:5544 -sTCP:LISTEN)",
+      "Bash(lsof -nP -iTCP:8000 -sTCP:LISTEN)",
+      "Bash(curl -s http://localhost:8000/app.js)",
+      "Bash(curl -s http://localhost:8000/index.html)",
+      "Bash(grep -nE \"annotations|stop_|wdraw_|Stop contrib|Withdraw \\\\\\\\\\\\${\")",
+      "Bash(node -e \"new Function\\(require\\('fs'\\).readFileSync\\('/Users/walt/compound/app.js','utf8'\\)\\); console.log\\('syntax OK'\\)\")"
     ]
   }
 }
