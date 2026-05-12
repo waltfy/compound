@@ -31,7 +31,7 @@
   });
 
   let state = {
-    currency: '$',
+    currency: '£',
     startAge: null,
     activeId: null,
     series: [defaultSeries(0)],

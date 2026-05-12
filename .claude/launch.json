@@ -4,8 +4,9 @@
     {
       "name": "compound",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "5544"],
-      "port": 5544
+      "runtimeArgs": ["-m", "http.server"],
+      "port": 5544,
+      "autoPort": true
     }
   ]
 }
